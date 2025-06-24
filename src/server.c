@@ -28,10 +28,30 @@ typedef struct {
 Session sessions[MAX_SESSIONS];
 int session_count = 0;
 
+// Validate UUID format (basic validation)
+int is_valid_uuid(const char* uuid) {
+    if (strlen(uuid) != 36) return 0;
+    
+    // Check for hyphens at positions 8, 13, 18, 23
+    if (uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' || uuid[23] != '-') {
+        return 0;
+    }
+    
+    // Check that other characters are hex digits
+    for (int i = 0; i < 36; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) continue;
+        if (!((uuid[i] >= '0' && uuid[i] <= '9') || 
+              (uuid[i] >= 'A' && uuid[i] <= 'F') || 
+              (uuid[i] >= 'a' && uuid[i] <= 'f'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 // Generate random password and username
 void generate_credentials(char* username, char* password) {
     const char charset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    srand((unsigned int)time(NULL));
     
     // Generate 8-character username
     for (int i = 0; i < 8; i++) {
@@ -80,6 +100,7 @@ void handle_client(SOCKET client_socket) {
     
     int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
     if (bytes_received <= 0) {
+        printf("Client disconnected or recv failed: %d\n", WSAGetLastError());
         closesocket(client_socket);
         return;
     }
@@ -92,18 +113,23 @@ void handle_client(SOCKET client_socket) {
         // Format: BOOK:UUID:DURATION_MINUTES
         char uuid[UUID_LENGTH];
         int duration;
-        
-        if (sscanf_s(buffer + 5, "%36s:%d", uuid, sizeof(uuid), &duration) == 2) {
-            int session_id = create_session(uuid, duration);
-            if (session_id >= 0) {
-                Session* session = &sessions[session_id];
-                sprintf_s(response, sizeof(response), 
-                    "SUCCESS:USERNAME:%s:PASSWORD:%s:DURATION:%d",
-                    session->username, session->password, session->duration_minutes);
-                printf("Created session for UUID %s - Username: %s, Password: %s\n", 
-                    uuid, session->username, session->password);
+          if (sscanf_s(buffer + 5, "%36s:%d", uuid, sizeof(uuid), &duration) == 2) {
+            if (!is_valid_uuid(uuid)) {
+                strcpy_s(response, sizeof(response), "ERROR:INVALID_UUID_FORMAT");
+            } else if (duration <= 0 || duration > 480) { // Max 8 hours
+                strcpy_s(response, sizeof(response), "ERROR:INVALID_DURATION");
             } else {
-                strcpy_s(response, sizeof(response), "ERROR:SESSION_LIMIT_REACHED");
+                int session_id = create_session(uuid, duration);
+                if (session_id >= 0) {
+                    Session* session = &sessions[session_id];
+                    sprintf_s(response, sizeof(response), 
+                        "SUCCESS:USERNAME:%s:PASSWORD:%s:DURATION:%d",
+                        session->username, session->password, session->duration_minutes);
+                    printf("Created session for UUID %s - Username: %s, Password: %s\n", 
+                        uuid, session->username, session->password);
+                } else {
+                    strcpy_s(response, sizeof(response), "ERROR:SESSION_LIMIT_REACHED");
+                }
             }
         } else {
             strcpy_s(response, sizeof(response), "ERROR:INVALID_FORMAT");
@@ -206,8 +232,10 @@ int main() {
     SOCKET server_socket, client_socket;
     struct sockaddr_in server_addr, client_addr;
     int client_addr_len = sizeof(client_addr);
+      printf("Lab Management Server Starting...\n");
     
-    printf("Lab Management Server Starting...\n");
+    // Seed random number generator once
+    srand((unsigned int)time(NULL));
     
     // Initialize Winsock
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -228,10 +256,9 @@ int main() {
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
-    
-    // Bind socket
+      // Bind socket
     if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        printf("Bind failed\n");
+        printf("Bind failed with error: %d\n", WSAGetLastError());
         closesocket(server_socket);
         WSACleanup();
         return 1;
@@ -251,14 +278,17 @@ int main() {
     printf("  VALIDATE:USERNAME:PASSWORD - Validate credentials\n");
     printf("  EXTEND:UUID - Extend session by 30 minutes\n");
     printf("  STATUS:UUID - Check session status\n\n");
-    
-    // Accept connections
+      // Accept connections
     while (1) {
         client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_addr_len);
         if (client_socket == INVALID_SOCKET) {
-            printf("Accept failed\n");
+            printf("Accept failed with error: %d\n", WSAGetLastError());
             continue;
         }
+        
+        printf("Client connected from %s:%d\n", 
+               inet_ntoa(client_addr.sin_addr), 
+               ntohs(client_addr.sin_port));
         
         // Handle client in separate thread (simplified version - handle synchronously)
         handle_client(client_socket);
